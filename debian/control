@@ -1,0 +1,12 @@
+Package: simple-backup
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: @ARCH@
+Build-Depends: g++, nlohmann-json3-dev
+Depends: libc6 (>= 2.17), libstdc++6
+Maintainer: Simple Backup <admin@example.com>
+Description: Simple inotify-based directory backup service
+ Watches configured source directories for changes using the Linux
+ inotify API and copies modified files to a configured output location.
+ Uses signalfd + poll(2) so the process sleeps with zero CPU when idle.

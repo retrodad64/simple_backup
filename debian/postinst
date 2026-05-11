@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+
+systemctl daemon-reload || true
+
+if [ "$1" = "configure" ]; then
+    echo "Edit /etc/simple_backup/simple_backup.json then enable and start the service:"
+    echo "  systemctl enable --now simple_backup"
+fi
