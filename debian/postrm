@@ -1,0 +1,14 @@
+#!/bin/bash
+set -e
+
+case "$1" in
+    remove)
+        systemctl disable simple_backup.service 2>/dev/null || true
+        systemctl daemon-reload || true
+        ;;
+    purge)
+        systemctl disable simple_backup.service 2>/dev/null || true
+        systemctl daemon-reload || true
+        rm -rf /etc/simple_backup
+        ;;
+esac

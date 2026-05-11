@@ -1,0 +1,19 @@
+#!/bin/bash
+set -e
+
+CONFIG_DIR=/etc/simple_backup
+CONFIG_FILE=${CONFIG_DIR}/simple_backup.json
+
+mkdir -p "${CONFIG_DIR}"
+
+if [ ! -f "${CONFIG_FILE}" ]; then
+    cat > "${CONFIG_FILE}" << 'EOF'
+{
+    "sources": [],
+    "destination": ""
+}
+EOF
+    chmod 640 "${CONFIG_FILE}"
+    echo "Created default config at ${CONFIG_FILE}"
+    echo "Edit it to set your source directories and output path before starting the service."
+fi

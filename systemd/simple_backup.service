@@ -1,0 +1,19 @@
+[Unit]
+Description=Simple Backup Service
+Documentation=man:simple_backup(1)
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/simple_backup
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=simple_backup
+# Run as root so it can read files owned by any user.
+# Adjust to a dedicated user if your sources permit.
+User=root
+
+[Install]
+WantedBy=multi-user.target

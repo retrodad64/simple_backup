@@ -1,0 +1,6 @@
+{
+    "sources": [
+        "/home"
+    ],
+    "destination": "/backup"
+}
