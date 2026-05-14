@@ -125,3 +125,127 @@ void Copier::syncAll(std::atomic<bool>& stop) {
                  std::to_string(skipped) + " up-to-date, " +
                  std::to_string(failed) + " failed.");
 }
+
+void Copier::synchronize(std::atomic<bool>& stop) {
+    if (!destAvailable()) {
+        Logger::error("Destination not available: " + dest_);
+        return;
+    }
+
+    for (const auto& base : sources_) {
+        if (stop) break;
+
+        fs::path src_root(base);
+        std::error_code ec;
+
+        if (!fs::exists(src_root, ec)) {
+            Logger::warn("Source not found, skipping: " + base);
+            continue;
+        }
+
+        fs::path mirror_root = fs::path(dest_) / src_root.filename();
+
+        if (!fs::exists(mirror_root, ec)) {
+            Logger::info("Mirror not found, copying source to: " + mirror_root.string());
+            fs::copy(src_root, mirror_root,
+                     fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
+            if (ec) Logger::warn("Initial copy failed: " + ec.message());
+            else    Logger::info("Copied: " + base + " -> " + mirror_root.string());
+            continue;
+        }
+
+        Logger::info("Synchronizing: " + base + " -> " + mirror_root.string());
+        int copied = 0, skipped = 0, removed = 0, failed = 0;
+
+        // Phase 1: copy/update source → mirror
+        fs::recursive_directory_iterator src_it(src_root,
+            fs::directory_options::skip_permission_denied, ec);
+        if (ec) {
+            Logger::warn("Cannot iterate source: " + base + ": " + ec.message());
+            continue;
+        }
+
+        for (; src_it != fs::recursive_directory_iterator(); ++src_it) {
+            if (stop) break;
+
+            fs::path rel = fs::relative(src_it->path(), src_root, ec);
+            if (ec) { ++failed; continue; }
+            fs::path dst = mirror_root / rel;
+
+            if (src_it->is_directory(ec)) {
+                fs::create_directories(dst, ec);
+                if (ec) {
+                    Logger::warn("mkdir " + dst.string() + ": " + ec.message());
+                    ++failed;
+                }
+                continue;
+            }
+
+            if (!src_it->is_regular_file(ec)) continue;
+
+            bool needs_copy = !fs::exists(dst, ec);
+            if (!needs_copy) {
+                auto src_sz = fs::file_size(src_it->path(), ec);
+                auto dst_sz = ec ? static_cast<uintmax_t>(-1) : fs::file_size(dst, ec);
+                if (ec || src_sz != dst_sz) {
+                    needs_copy = true;
+                } else {
+                    auto src_perms = fs::status(src_it->path(), ec).permissions();
+                    auto dst_perms = ec ? fs::perms::none : fs::status(dst, ec).permissions();
+                    needs_copy = ec || (src_perms != dst_perms);
+                }
+            }
+
+            if (!needs_copy) { ++skipped; continue; }
+
+            fs::create_directories(dst.parent_path(), ec);
+            fs::copy(src_it->path(), dst, fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                Logger::warn("Copy " + src_it->path().string() + " -> " + dst.string() + ": " + ec.message());
+                ++failed;
+            } else {
+                auto perms = fs::status(src_it->path(), ec).permissions();
+                if (!ec) fs::permissions(dst, perms, ec);
+                Logger::debug("Synced: " + src_it->path().string());
+                ++copied;
+            }
+        }
+
+        // Phase 2: remove mirror entries that no longer exist in source
+        std::vector<fs::path> to_remove;
+        {
+            fs::recursive_directory_iterator mir_it(mirror_root,
+                fs::directory_options::skip_permission_denied, ec);
+            if (!ec) {
+                for (; mir_it != fs::recursive_directory_iterator(); ++mir_it) {
+                    if (stop) break;
+                    fs::path rel = fs::relative(mir_it->path(), mirror_root, ec);
+                    if (ec) continue;
+                    if (!fs::exists(src_root / rel)) {
+                        to_remove.push_back(mir_it->path());
+                        if (mir_it->is_directory(ec))
+                            mir_it.disable_recursion_pending();
+                    }
+                }
+            }
+        }
+
+        for (const auto& p : to_remove) {
+            if (stop) break;
+            std::error_code ec2;
+            fs::remove_all(p, ec2);
+            if (ec2) {
+                Logger::warn("Remove failed: " + p.string() + ": " + ec2.message());
+                ++failed;
+            } else {
+                Logger::debug("Removed: " + p.string());
+                ++removed;
+            }
+        }
+
+        Logger::info("Synchronize complete: " + std::to_string(copied) + " copied, " +
+                     std::to_string(skipped) + " up-to-date, " +
+                     std::to_string(removed) + " removed, " +
+                     std::to_string(failed) + " failed.");
+    }
+}
