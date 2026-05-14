@@ -21,16 +21,19 @@ static constexpr const char* DEFAULT_CONFIG =
 
 static void usage(const char* prog) {
     std::cerr << "Usage: " << prog
-              << " [--config <path>] [--foreground] [--verbose]\n"
+              << " [--config <path>] [--foreground] [--verbose] [--synchronize]\n"
               << "  --config <path>  Config file (default: " << DEFAULT_CONFIG << ")\n"
               << "  --foreground     Log to stderr instead of syslog\n"
-              << "  --verbose        Enable debug logging\n";
+              << "  --verbose        Enable debug logging\n"
+              << "  --synchronize    One-shot sync: make dest/<source-name> match source,\n"
+              << "                   then exit. Other dirs at the destination root are ignored.\n";
 }
 
 int main(int argc, char* argv[]) {
     std::string config_path = DEFAULT_CONFIG;
-    bool use_syslog = true;
-    bool verbose    = false;
+    bool use_syslog   = true;
+    bool verbose       = false;
+    bool do_synchronize = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -40,6 +43,8 @@ int main(int argc, char* argv[]) {
             use_syslog = false;
         else if (arg == "--verbose" || arg == "-v")
             verbose = true;
+        else if (arg == "--synchronize" || arg == "-s")
+            do_synchronize = true;
         else if (arg == "--help" || arg == "-h") {
             usage(argv[0]); return 0;
         } else {
@@ -65,6 +70,19 @@ int main(int argc, char* argv[]) {
     if (cfg.destination.empty()) {
         Logger::error("No destination configured in " + config_path);
         return 1;
+    }
+
+    if (do_synchronize) {
+        std::error_code ec;
+        std::filesystem::create_directories(cfg.destination, ec);
+        Copier copier(cfg.sources, cfg.destination);
+        if (!copier.destAvailable()) {
+            Logger::error("Destination not available: " + cfg.destination);
+            return 1;
+        }
+        std::atomic<bool> stop{false};
+        copier.synchronize(stop);
+        return 0;
     }
 
     // Block SIGTERM/SIGINT; deliver via signalfd so poll() wakes cleanly.

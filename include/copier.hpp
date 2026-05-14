@@ -9,6 +9,7 @@ public:
 
     void handle(const std::string& path, bool is_delete);
     void syncAll(std::atomic<bool>& stop);
+    void synchronize(std::atomic<bool>& stop);
     bool destAvailable() const;
 
 private:
