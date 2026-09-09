@@ -38,6 +38,23 @@ be copied. The destination directory is created automatically when the service
 starts, provided the parent path exists (e.g. the drive is mounted).
 
 
+## Destination layout
+
+Each source directory is recreated by name under the destination. With the
+config above, /home/user/Documents is backed up to
+/media/user/DRIVE/Backup/Documents.
+
+    /home/user/Documents/report.odt  ->  /media/user/DRIVE/Backup/Documents/report.odt
+    /home/user/Pictures/2026/a.jpg   ->  /media/user/DRIVE/Backup/Pictures/2026/a.jpg
+
+This keeps multiple sources separate, so each one you add gets its own
+directory alongside the others. Two sources whose last path component is the
+same, such as /home/alice/Documents and /home/bob/Documents, would share one
+directory at the destination and overwrite each other. The service logs a
+warning at startup when it sees that, and the fix is to back up the parent
+directory instead.
+
+
 ## Running manually
 
     ./build/release/simple_backup --config /path/to/simple_backup.json --foreground

@@ -62,6 +62,16 @@ void Watcher::addWatchRecursive(const std::string& path) {
     }
 }
 
+// True when this newly created file should get an IN_CLOSE_WRITE of its own.
+// Symlinks, hard links and special files are created without a write-open, so
+// no such event is coming and they have to be reported at creation time.
+static bool writeCloseExpected(const std::string& path) {
+    std::error_code ec;
+    auto st = fs::symlink_status(path, ec);
+    if (ec || !fs::is_regular_file(st)) return false;
+    return fs::hard_link_count(path, ec) == 1 && !ec;
+}
+
 void Watcher::handleEvent(const inotify_event* ev, EventCallback& cb) {
     auto it = wd_path_.find(ev->wd);
     if (it == wd_path_.end()) return;
@@ -81,6 +91,11 @@ void Watcher::handleEvent(const inotify_event* ev, EventCallback& cb) {
         if (is_dir) {
             addWatchRecursive(full);
             cb({EventType::DirCreated, full});
+        } else if (writeCloseExpected(full)) {
+            // The file was created by a write-open, so it is empty or partial
+            // right now and IN_CLOSE_WRITE will follow once the data is there.
+            // Reporting it here too would back up the same file twice.
+            Logger::debug("Created, waiting for write to finish: " + full);
         } else {
             cb({EventType::FileCreated, full});
         }

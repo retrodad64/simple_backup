@@ -13,8 +13,16 @@ public:
     bool destAvailable() const;
 
 private:
-    std::vector<std::string> sources_;
+    // One configured source directory. name is its final path component, which
+    // becomes a directory of the same name at the destination root.
+    struct Source {
+        std::string base;
+        std::string name;
+    };
+
+    std::vector<Source> sources_;
     std::string dest_;
 
+    std::string mirrorRoot(const Source& src) const;
     std::string destPath(const std::string& src) const;
 };
