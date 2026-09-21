@@ -1,4 +1,6 @@
 #include "config.hpp"
+#include "configurator.hpp"
+#include "destination.hpp"
 #include "watcher.hpp"
 #include "copier.hpp"
 #include "logger.hpp"
@@ -26,7 +28,9 @@ static void usage(const char* prog) {
               << "  --foreground     Log to stderr instead of syslog\n"
               << "  --verbose        Enable debug logging\n"
               << "  --synchronize    One-shot sync: make dest/<source-name> match source,\n"
-              << "                   then exit. Other dirs at the destination root are ignored.\n";
+              << "                   then exit. Other dirs at the destination root are ignored.\n"
+              << "  --create-configuration\n"
+              << "                   Build a config file by answering questions, then exit.\n";
 }
 
 int main(int argc, char* argv[]) {
@@ -34,6 +38,7 @@ int main(int argc, char* argv[]) {
     bool use_syslog   = true;
     bool verbose       = false;
     bool do_synchronize = false;
+    bool do_create_configuration = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -45,12 +50,21 @@ int main(int argc, char* argv[]) {
             verbose = true;
         else if (arg == "--synchronize" || arg == "-s")
             do_synchronize = true;
+        else if (arg == "--create-configuration")
+            do_create_configuration = true;
         else if (arg == "--help" || arg == "-h") {
             usage(argv[0]); return 0;
         } else {
             std::cerr << "Unknown option: " << arg << "\n";
             usage(argv[0]); return 1;
         }
+    }
+
+    // The wizard talks to a terminal, so its own output goes to stdout and any
+    // logging goes to stderr beside it rather than to syslog.
+    if (do_create_configuration) {
+        Logger::init("simple_backup", false, verbose);
+        return Configurator::run();
     }
 
     Logger::init("simple_backup", use_syslog, verbose);
@@ -67,19 +81,19 @@ int main(int argc, char* argv[]) {
         Logger::error("No source directories configured in " + config_path);
         return 1;
     }
-    if (cfg.destination.empty()) {
+    if (cfg.destination.empty() && !cfg.usesDevice()) {
         Logger::error("No destination configured in " + config_path);
         return 1;
     }
 
     if (do_synchronize) {
-        std::error_code ec;
-        std::filesystem::create_directories(cfg.destination, ec);
-        Copier copier(cfg.sources, cfg.destination);
-        if (!copier.destAvailable()) {
-            Logger::error("Destination not available: " + cfg.destination);
+        const std::string destination = Destination::resolve(cfg);
+        if (destination.empty()) {
+            Logger::error("Destination not available: " + Destination::describe(cfg));
             return 1;
         }
+
+        Copier copier(cfg.sources, destination);
         std::atomic<bool> stop{false};
         copier.synchronize(stop);
         return 0;
@@ -101,7 +115,7 @@ int main(int argc, char* argv[]) {
     int exit_code = 0;
     try {
         Watcher watcher(cfg.sources);
-        Copier  copier(cfg.sources, cfg.destination);
+        Copier  copier(cfg.sources, "");
 
         std::atomic<bool> sync_stop{false};
         std::mutex        sync_mu;
@@ -112,32 +126,37 @@ int main(int argc, char* argv[]) {
             sync_cv.wait_for(lk, dur, [&]{ return sync_stop.load(); });
         };
 
-        // Sync thread: performs an initial full sync when the destination first
-        // becomes available, then re-syncs any time the destination reappears
-        // (e.g. after a drive is remounted).
+        // Sync thread: resolves the destination every cycle and runs a full
+        // sync whenever it changes. A device backed destination changes when
+        // the drive is plugged in, and again if udisks picks a different mount
+        // point than last time.
         std::thread sync_thread([&] {
-            bool dest_was_available = false;
+            std::string current;
             while (!sync_stop) {
-                // Attempt to create the destination directory each cycle.
-                // This is a no-op when it already exists. When the drive is
-                // mounted but the directory is missing it creates it, making
-                // destAvailable() return true on the same iteration.
-                // When the drive is not mounted the parent path is absent and
-                // this fails silently — no directory is created on the local fs.
-                {
-                    std::error_code ec;
-                    std::filesystem::create_directories(cfg.destination, ec);
+                const std::string resolved = Destination::resolve(cfg);
+                if (resolved != current) {
+                    copier.setDestination(resolved);
+                    current = resolved;
+
+                    if (resolved.empty()) {
+                        Logger::info("Destination is gone, waiting for " + Destination::describe(cfg));
+                    } else {
+                        Logger::info("Destination is " + resolved);
+                        if (Destination::onRootFilesystem(resolved)) {
+                            Logger::warn("Destination " + resolved + " is on the same filesystem as /, so this is "
+                                         "backing up to the local disk. Name the drive by uuid to avoid that.");
+                        }
+
+                        copier.syncAll(sync_stop);
+                    }
                 }
-                bool dest_now = copier.destAvailable();
-                if (dest_now && !dest_was_available)
-                    copier.syncAll(sync_stop);
-                dest_was_available = dest_now;
-                sync_sleep(std::chrono::seconds(dest_now ? 30 : 5));
+
+                sync_sleep(std::chrono::seconds(current.empty() ? 5 : 30));
             }
         });
 
-        Logger::info("Started — watching " + std::to_string(cfg.sources.size()) +
-                     " source(s), destination: " + cfg.destination);
+        Logger::info("Started, watching " + std::to_string(cfg.sources.size()) +
+                     " source(s), destination: " + Destination::describe(cfg));
 
         watcher.run([&copier](const WatchEvent& ev) {
             bool del = (ev.type == EventType::FileDeleted ||

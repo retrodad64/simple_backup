@@ -1,6 +1,13 @@
 {
     "sources": [
-        "/home"
+        "/home/user/Documents",
+        "/home/user/Pictures"
     ],
-    "destination": "/backup"
+    "destination": {
+        "device": {
+            "uuid": "1A2B-3C4D",
+            "name": "Backup Drive"
+        },
+        "path": "Backup"
+    }
 }

@@ -1,8 +1,10 @@
 CXX     := g++
 TARGET  := simple_backup
-SRCS    := src/main.cpp src/config.cpp src/watcher.cpp src/copier.cpp src/logger.cpp
+SRCS    := src/main.cpp src/config.cpp src/configurator.cpp src/destination.cpp src/process.cpp src/watcher.cpp src/copier.cpp src/logger.cpp
 
-CXXFLAGS_COMMON  := -std=c++17 -Wall -Wextra -I include
+# -MMD -MP writes a .d file per object so a header change rebuilds whatever
+# included it. Without it a header edit leaves stale objects behind.
+CXXFLAGS_COMMON  := -std=c++17 -Wall -Wextra -I include -MMD -MP
 CXXFLAGS_RELEASE := $(CXXFLAGS_COMMON) -O2 -DNDEBUG
 CXXFLAGS_DEBUG   := $(CXXFLAGS_COMMON) -g3 -O0 -DDEBUG -fsanitize=address,undefined
 LDFLAGS_DEBUG    := -fsanitize=address,undefined
@@ -31,6 +33,8 @@ build/debug/%.o: src/%.cpp | build/debug
 
 build/release build/debug:
 	mkdir -p $@
+
+-include $(OBJS_RELEASE:.o=.d) $(OBJS_DEBUG:.o=.d)
 
 clean:
 	rm -rf build/

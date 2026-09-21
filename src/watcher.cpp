@@ -67,8 +67,11 @@ void Watcher::addWatchRecursive(const std::string& path) {
 // no such event is coming and they have to be reported at creation time.
 static bool writeCloseExpected(const std::string& path) {
     std::error_code ec;
-    auto st = fs::symlink_status(path, ec);
-    if (ec || !fs::is_regular_file(st)) return false;
+    auto status = fs::symlink_status(path, ec);
+    if (ec || !fs::is_regular_file(status)) {
+        return false;
+    }
+
     return fs::hard_link_count(path, ec) == 1 && !ec;
 }
 
