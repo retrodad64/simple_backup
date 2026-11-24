@@ -4,10 +4,13 @@
         "/home/user/Pictures"
     ],
     "destination": {
-        "device": {
-            "uuid": "1A2B-3C4D",
-            "name": "Backup Drive"
+        "sftp": {
+            "host": "nas.home.lan",
+            "username": "backup",
+            "identity_file": "/etc/simple_backup/id_ed25519",
+            "known_hosts_file": "/etc/simple_backup/known_hosts",
+            "name": "NAS"
         },
-        "path": "Backup"
+        "path": "/srv/backup/laptop"
     }
 }

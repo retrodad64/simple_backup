@@ -25,10 +25,10 @@ namespace Destination {
 // The directory to back up into, or empty when it is not available yet.
 // disk_by_root is where the udev symlink directories live, and only a test
 // passes anything but the default.
-std::string resolve(const Config& config, const std::string& disk_by_root = "/dev/disk");
+std::string resolve(const Target& target, const std::string& disk_by_root = "/dev/disk");
 
 // What the config asked for, for log messages.
-std::string describe(const Config& config);
+std::string describe(const Target& target);
 
 // The device node for an identifier, such as "/dev/sda1". Empty when the
 // device is not attached. disk_by_root is where the udev symlink directories

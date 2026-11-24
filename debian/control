@@ -3,10 +3,11 @@ Version: @VERSION@
 Section: utils
 Priority: optional
 Architecture: @ARCH@
-Build-Depends: g++, nlohmann-json3-dev
-Depends: libc6 (>= 2.17), libstdc++6
+Build-Depends: g++, make, pkg-config, nlohmann-json3-dev, libremote-files-dev
+Depends: libc6 (>= 2.17), libstdc++6@REMOTE_FILES_DEPENDS@
 Maintainer: Simple Backup <admin@example.com>
 Description: Simple inotify-based directory backup service
  Watches configured source directories for changes using the Linux
- inotify API and copies modified files to a configured output location.
+ inotify API and copies modified files to a configured output location,
+ a removable drive, a WebDAV server, or an SFTP server.
  Uses signalfd + poll(2) so the process sleeps with zero CPU when idle.

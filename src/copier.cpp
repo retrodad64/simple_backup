@@ -2,9 +2,8 @@
 #include "copier.hpp"
 #include "logger.hpp"
 
-#include <chrono>
 #include <filesystem>
-#include <unistd.h>
+#include <functional>
 
 namespace fs = std::filesystem;
 
@@ -29,45 +28,8 @@ static bool relativeTo(const std::string& base, const std::string& src, std::str
     return true;
 }
 
-// True when dst already holds the current contents of src: same size, and dst
-// written no earlier than src. A copy takes the current time as its mtime, so
-// a file that has not changed since it was last backed up tests as up to date.
-// FAT keeps mtimes on a two second boundary, so a copy to a FAT destination
-// lands with a timestamp up to two seconds earlier than its source. Without
-// this tolerance every sync to a USB stick recopies every file.
-static constexpr std::chrono::seconds MTIME_TOLERANCE(2);
-
-static bool destUpToDate(const std::string& src, const std::string& dst) {
-    std::error_code ec;
-    if (!fs::exists(dst, ec)) {
-        return false;
-    }
-
-    auto src_size = fs::file_size(src, ec);
-    if (ec) {
-        return false;
-    }
-
-    auto dst_size = fs::file_size(dst, ec);
-    if (ec || src_size != dst_size) {
-        return false;
-    }
-
-    auto src_time = fs::last_write_time(src, ec);
-    if (ec) {
-        return false;
-    }
-
-    auto dst_time = fs::last_write_time(dst, ec);
-    if (ec) {
-        return false;
-    }
-
-    return dst_time + MTIME_TOLERANCE >= src_time;
-}
-
-Copier::Copier(const std::vector<std::string>& sources, const std::string& destination)
-    : dest_(Config::normalizePath(destination)) {
+Copier::Copier(const std::vector<std::string>& sources, std::shared_ptr<Storage> storage, std::string name)
+    : name_(std::move(name)), storage_(std::move(storage)) {
     for (const auto& path : sources) {
         Source source{Config::normalizePath(path), ""};
         source.name = fs::path(source.base).filename().string();
@@ -88,286 +50,294 @@ Copier::Copier(const std::vector<std::string>& sources, const std::string& desti
     }
 }
 
-void Copier::setDestination(const std::string& destination) {
-    std::lock_guard<std::mutex> lock(dest_mutex_);
-    dest_ = destination;
+void Copier::setStorage(std::shared_ptr<Storage> storage) {
+    std::lock_guard<std::mutex> lock(storage_mutex_);
+    storage_ = std::move(storage);
 }
 
-std::string Copier::destination() const {
-    std::lock_guard<std::mutex> lock(dest_mutex_);
-    return dest_;
+std::shared_ptr<Storage> Copier::storage() const {
+    std::lock_guard<std::mutex> lock(storage_mutex_);
+    return storage_;
 }
 
-bool Copier::destAvailable() const {
-    const std::string current = destination();
-    if (current.empty()) {
-        return false;
-    }
-
-    return access(current.c_str(), W_OK) == 0;
+bool Copier::takeResyncRequest() {
+    return resync_requested_.exchange(false);
 }
 
-// Where a source directory is mirrored: <destination>/<source directory name>.
-std::string Copier::mirrorRoot(const std::string& destination, const Source& source) const {
-    return destination + "/" + source.name;
-}
-
-// Returns the destination path that mirrors the source structure under dest_.
-// The source directory's own name is recreated at the destination:
-// /home/user/Documents/rel/file -> dest_/Documents/rel/file
-std::string Copier::destPath(const std::string& destination, const std::string& src) const {
+// The storage path that mirrors a source path. The source directory's own name
+// is recreated at the destination:
+// /home/user/Documents/rel/file -> Documents/rel/file
+std::string Copier::destPath(const std::string& src) const {
     for (const auto& source : sources_) {
         std::string rel;
         if (!relativeTo(source.base, src, rel)) {
             continue;
         }
 
-        const std::string root = mirrorRoot(destination, source);
-        return rel.empty() ? root : root + "/" + rel;
+        return rel.empty() ? source.name : source.name + "/" + rel;
     }
 
     return {};
 }
 
 void Copier::handle(const std::string& path, bool is_delete) {
-    const std::string destination = this->destination();
-    if (destination.empty() || access(destination.c_str(), W_OK) != 0) {
-        Logger::warn("Destination unavailable, skipping: " + path);
+    const std::shared_ptr<Storage> storage = this->storage();
+    if (!storage || !storage->writable()) {
+        Logger::warn("Destination " + name_ + " unavailable, skipping: " + path);
         return;
     }
 
-    std::string dest = destPath(destination, path);
+    const std::string dest = destPath(path);
     if (dest.empty()) {
         Logger::warn("No matching source base for: " + path);
         return;
     }
 
-    if (is_delete) {
+    try {
+        if (is_delete) {
+            storage->removeAll(dest);
+            Logger::info("Removed: " + storage->describe(dest));
+            return;
+        }
+
+        // Source may have vanished between the event and now.
         std::error_code ec;
-        fs::remove_all(dest, ec);
-        if (!ec)
-            Logger::info("Removed: " + dest);
-        else
-            Logger::warn("Remove failed for " + dest + ": " + ec.message());
-        return;
-    }
+        if (!fs::exists(path, ec)) {
+            return;
+        }
 
-    // Source may have vanished between the event and now.
-    if (!fs::exists(path)) return;
+        if (fs::is_directory(path, ec)) {
+            storage->createDirectories(dest);
+            Logger::info("Dir created: " + storage->describe(dest));
+            return;
+        }
 
-    std::error_code ec;
-    if (fs::is_directory(path)) {
-        fs::create_directories(dest, ec);
-        if (ec) Logger::warn("mkdir " + dest + ": " + ec.message());
-        else    Logger::info("Dir created: " + dest);
-    } else {
-        if (destUpToDate(path, dest)) {
+        if (storage->upToDate(path, dest)) {
             Logger::debug("Already backed up, skipping: " + path);
             return;
         }
 
-        fs::create_directories(fs::path(dest).parent_path(), ec);
-        if (ec) { Logger::warn("mkdir parent for " + dest + ": " + ec.message()); return; }
-        fs::copy(path, dest, fs::copy_options::overwrite_existing, ec);
-        if (ec) Logger::warn("Copy " + path + " -> " + dest + ": " + ec.message());
-        else    Logger::info("Copied: " + path + " -> " + dest);
+        storage->copyFile(path, dest, false);
+        Logger::info("Copied: " + path + " -> " + storage->describe(dest));
+    } catch (const StorageUnavailable& error) {
+        Logger::warn("Destination " + name_ + " unavailable, " + path + " waits for the next sync: " + error.what());
+        resync_requested_ = true;
+    } catch (const std::exception& error) {
+        Logger::warn(error.what());
     }
 }
 
-void Copier::syncAll(std::atomic<bool>& stop) {
-    const std::string destination = this->destination();
-    if (destination.empty() || access(destination.c_str(), W_OK) != 0) {
-        return;
+bool Copier::syncAll(std::atomic<bool>& stop) {
+    const std::shared_ptr<Storage> storage = this->storage();
+    if (!storage || !storage->writable()) {
+        return false;
     }
 
-    Logger::info("Sync started.");
-    std::error_code ec;
+    Logger::info("Sync started: " + storage->describe(""));
     int copied = 0, skipped = 0, failed = 0;
+
+    try {
+        for (const auto& source : sources_) {
+            if (stop) {
+                break;
+            }
+
+            std::error_code ec;
+            fs::recursive_directory_iterator it(source.base, fs::directory_options::skip_permission_denied, ec);
+            if (ec) {
+                Logger::warn("Sync: cannot iterate " + source.base + ": " + ec.message());
+                continue;
+            }
+
+            // Create the mirror directory even when the source is empty.
+            try {
+                storage->createDirectories(source.name);
+            } catch (const StorageUnavailable&) {
+                throw;
+            } catch (const std::exception& error) {
+                Logger::warn(std::string("Sync ") + error.what());
+            }
+
+            for (const auto& entry : it) {
+                if (stop) {
+                    break;
+                }
+
+                const std::string src_path = entry.path().string();
+                const std::string dst_path = destPath(src_path);
+                if (dst_path.empty()) {
+                    continue;
+                }
+
+                try {
+                    if (entry.is_directory(ec)) {
+                        storage->createDirectories(dst_path);
+                        continue;
+                    }
+
+                    if (!entry.is_regular_file(ec)) {
+                        continue;
+                    }
+
+                    if (storage->upToDate(src_path, dst_path)) {
+                        ++skipped;
+                        continue;
+                    }
+
+                    storage->copyFile(src_path, dst_path, false);
+                    Logger::debug("Synced: " + src_path);
+                    ++copied;
+                } catch (const StorageUnavailable&) {
+                    throw;
+                } catch (const std::exception& error) {
+                    Logger::warn(std::string("Sync ") + error.what());
+                    ++failed;
+                }
+            }
+        }
+    } catch (const StorageUnavailable& error) {
+        Logger::warn("Sync to " + storage->describe("") + " stopped, destination unavailable: " + error.what());
+        return false;
+    }
+
+    Logger::info("Sync complete for " + storage->describe("") + ": " + std::to_string(copied) + " copied, " +
+                 std::to_string(skipped) + " up-to-date, " +
+                 std::to_string(failed) + " failed.");
+    return true;
+}
+
+bool Copier::synchronize(std::atomic<bool>& stop) {
+    const std::shared_ptr<Storage> storage = this->storage();
+    if (!storage || !storage->writable()) {
+        Logger::error("Destination not available: " + (storage ? storage->describe("") : std::string()));
+        return false;
+    }
 
     for (const auto& source : sources_) {
         if (stop) {
             break;
         }
 
-        const std::string& base = source.base;
+        try {
+            if (!synchronizeSource(*storage, source, stop)) {
+                return false;
+            }
+        } catch (const StorageUnavailable& error) {
+            Logger::error(std::string("Synchronize stopped, destination unavailable: ") + error.what());
+            return false;
+        }
+    }
 
-        fs::recursive_directory_iterator it(base,
-            fs::directory_options::skip_permission_denied, ec);
+    return true;
+}
+
+// Makes <storage>/<source name> match one source: copies what is missing or
+// different, then removes what the source no longer has.
+bool Copier::synchronizeSource(Storage& storage, const Source& source, std::atomic<bool>& stop) {
+    const fs::path src_root(source.base);
+    std::error_code ec;
+
+    if (!fs::exists(src_root, ec)) {
+        Logger::warn("Source not found, skipping: " + source.base);
+        return true;
+    }
+
+    const std::string mirror_root = source.name;
+    if (!storage.exists(mirror_root)) {
+        Logger::info("Mirror not found, copying source to: " + storage.describe(mirror_root));
+    } else {
+        Logger::info("Synchronizing: " + source.base + " -> " + storage.describe(mirror_root));
+    }
+
+    storage.createDirectories(mirror_root);
+    int copied = 0, skipped = 0, removed = 0, failed = 0;
+
+    // Phase 1: copy/update source -> mirror
+    fs::recursive_directory_iterator src_it(src_root, fs::directory_options::skip_permission_denied, ec);
+    if (ec) {
+        Logger::warn("Cannot iterate source: " + source.base + ": " + ec.message());
+        return true;
+    }
+
+    for (; src_it != fs::recursive_directory_iterator(); ++src_it) {
+        if (stop) {
+            break;
+        }
+
+        const fs::path rel = fs::relative(src_it->path(), src_root, ec);
         if (ec) {
-            Logger::warn("Sync: cannot iterate " + base + ": " + ec.message());
+            ++failed;
             continue;
         }
 
-        // Create the mirror directory even when the source is empty.
-        fs::create_directories(mirrorRoot(destination, source), ec);
-        if (ec) {
-            Logger::warn("Sync mkdir " + mirrorRoot(destination, source) + ": " + ec.message());
-        }
+        const std::string dst = mirror_root + "/" + rel.generic_string();
 
-        for (const auto& entry : it) {
-            if (stop) break;
-
-            const std::string src_path = entry.path().string();
-            const std::string dst_path = destPath(destination, src_path);
-            if (dst_path.empty()) continue;
-
-            if (entry.is_directory(ec)) {
-                fs::create_directories(dst_path, ec);
-                if (ec) {
-                    Logger::warn("Sync mkdir " + dst_path + ": " + ec.message());
-                    ++failed;
-                }
+        try {
+            if (src_it->is_directory(ec)) {
+                storage.createDirectories(dst);
                 continue;
             }
 
-            if (!entry.is_regular_file(ec)) continue;
+            if (!src_it->is_regular_file(ec)) {
+                continue;
+            }
 
-            if (destUpToDate(src_path, dst_path)) {
+            if (storage.matches(src_it->path(), dst)) {
                 ++skipped;
                 continue;
             }
 
-            fs::create_directories(fs::path(dst_path).parent_path(), ec);
-            fs::copy(entry.path(), dst_path, fs::copy_options::overwrite_existing, ec);
-            if (ec) {
-                Logger::warn("Sync copy " + src_path + " -> " + dst_path + ": " + ec.message());
-                ++failed;
-            } else {
-                Logger::debug("Synced: " + src_path);
-                ++copied;
-            }
+            storage.copyFile(src_it->path(), dst, true);
+            Logger::debug("Synced: " + src_it->path().string());
+            ++copied;
+        } catch (const StorageUnavailable&) {
+            throw;
+        } catch (const std::exception& error) {
+            Logger::warn(error.what());
+            ++failed;
         }
     }
 
-    Logger::info("Sync complete: " + std::to_string(copied) + " copied, " +
-                 std::to_string(skipped) + " up-to-date, " +
-                 std::to_string(failed) + " failed.");
-}
+    // Phase 2: remove mirror entries missing from the source. A directory
+    // missing from the source goes whole, so its contents aren't visited.
+    std::vector<std::string> to_remove;
+    std::function<void(const std::string&)> visit = [&](const std::string& rel) {
+        for (const auto& entry : storage.list(rel.empty() ? mirror_root : mirror_root + "/" + rel)) {
+            if (stop) {
+                return;
+            }
 
-void Copier::synchronize(std::atomic<bool>& stop) {
-    const std::string destination = this->destination();
-    if (destination.empty() || access(destination.c_str(), W_OK) != 0) {
-        Logger::error("Destination not available: " + destination);
-        return;
-    }
+            const std::string child = rel.empty() ? entry.name : rel + "/" + entry.name;
+            std::error_code exists_ec;
+            if (!fs::exists(src_root / child, exists_ec)) {
+                to_remove.push_back(mirror_root + "/" + child);
+            } else if (entry.directory) {
+                visit(child);
+            }
+        }
+    };
+    visit("");
 
-    for (const auto& source : sources_) {
+    for (const auto& path : to_remove) {
         if (stop) {
             break;
         }
 
-        const std::string& base = source.base;
-        fs::path src_root(base);
-        std::error_code ec;
-
-        if (!fs::exists(src_root, ec)) {
-            Logger::warn("Source not found, skipping: " + base);
-            continue;
+        try {
+            storage.removeAll(path);
+            Logger::debug("Removed: " + storage.describe(path));
+            ++removed;
+        } catch (const StorageUnavailable&) {
+            throw;
+        } catch (const std::exception& error) {
+            Logger::warn(error.what());
+            ++failed;
         }
-
-        fs::path mirror_root = mirrorRoot(destination, source);
-
-        if (!fs::exists(mirror_root, ec)) {
-            Logger::info("Mirror not found, copying source to: " + mirror_root.string());
-            fs::copy(src_root, mirror_root,
-                     fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
-            if (ec) Logger::warn("Initial copy failed: " + ec.message());
-            else    Logger::info("Copied: " + base + " -> " + mirror_root.string());
-            continue;
-        }
-
-        Logger::info("Synchronizing: " + base + " -> " + mirror_root.string());
-        int copied = 0, skipped = 0, removed = 0, failed = 0;
-
-        // Phase 1: copy/update source → mirror
-        fs::recursive_directory_iterator src_it(src_root,
-            fs::directory_options::skip_permission_denied, ec);
-        if (ec) {
-            Logger::warn("Cannot iterate source: " + base + ": " + ec.message());
-            continue;
-        }
-
-        for (; src_it != fs::recursive_directory_iterator(); ++src_it) {
-            if (stop) break;
-
-            fs::path rel = fs::relative(src_it->path(), src_root, ec);
-            if (ec) { ++failed; continue; }
-            fs::path dst = mirror_root / rel;
-
-            if (src_it->is_directory(ec)) {
-                fs::create_directories(dst, ec);
-                if (ec) {
-                    Logger::warn("mkdir " + dst.string() + ": " + ec.message());
-                    ++failed;
-                }
-                continue;
-            }
-
-            if (!src_it->is_regular_file(ec)) continue;
-
-            bool needs_copy = !fs::exists(dst, ec);
-            if (!needs_copy) {
-                auto src_sz = fs::file_size(src_it->path(), ec);
-                auto dst_sz = ec ? static_cast<uintmax_t>(-1) : fs::file_size(dst, ec);
-                if (ec || src_sz != dst_sz) {
-                    needs_copy = true;
-                } else {
-                    auto src_perms = fs::status(src_it->path(), ec).permissions();
-                    auto dst_perms = ec ? fs::perms::none : fs::status(dst, ec).permissions();
-                    needs_copy = ec || (src_perms != dst_perms);
-                }
-            }
-
-            if (!needs_copy) { ++skipped; continue; }
-
-            fs::create_directories(dst.parent_path(), ec);
-            fs::copy(src_it->path(), dst, fs::copy_options::overwrite_existing, ec);
-            if (ec) {
-                Logger::warn("Copy " + src_it->path().string() + " -> " + dst.string() + ": " + ec.message());
-                ++failed;
-            } else {
-                auto perms = fs::status(src_it->path(), ec).permissions();
-                if (!ec) fs::permissions(dst, perms, ec);
-                Logger::debug("Synced: " + src_it->path().string());
-                ++copied;
-            }
-        }
-
-        // Phase 2: remove mirror entries that no longer exist in source
-        std::vector<fs::path> to_remove;
-        {
-            fs::recursive_directory_iterator mir_it(mirror_root,
-                fs::directory_options::skip_permission_denied, ec);
-            if (!ec) {
-                for (; mir_it != fs::recursive_directory_iterator(); ++mir_it) {
-                    if (stop) break;
-                    fs::path rel = fs::relative(mir_it->path(), mirror_root, ec);
-                    if (ec) continue;
-                    if (!fs::exists(src_root / rel)) {
-                        to_remove.push_back(mir_it->path());
-                        if (mir_it->is_directory(ec))
-                            mir_it.disable_recursion_pending();
-                    }
-                }
-            }
-        }
-
-        for (const auto& p : to_remove) {
-            if (stop) break;
-            std::error_code ec2;
-            fs::remove_all(p, ec2);
-            if (ec2) {
-                Logger::warn("Remove failed: " + p.string() + ": " + ec2.message());
-                ++failed;
-            } else {
-                Logger::debug("Removed: " + p.string());
-                ++removed;
-            }
-        }
-
-        Logger::info("Synchronize complete: " + std::to_string(copied) + " copied, " +
-                     std::to_string(skipped) + " up-to-date, " +
-                     std::to_string(removed) + " removed, " +
-                     std::to_string(failed) + " failed.");
     }
+
+    Logger::info("Synchronize complete: " + std::to_string(copied) + " copied, " +
+                 std::to_string(skipped) + " up-to-date, " +
+                 std::to_string(removed) + " removed, " +
+                 std::to_string(failed) + " failed.");
+    return true;
 }

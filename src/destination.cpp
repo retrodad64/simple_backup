@@ -161,14 +161,14 @@ std::string joinPath(const std::string& base, const std::string& relative) {
     return base + "/" + relative;
 }
 
-std::string resolveDevice(const Config& config, const std::string& disk_by_root) {
-    const std::string node = Destination::findDeviceNode(config.device, disk_by_root);
+std::string resolveDevice(const Target& target, const std::string& disk_by_root) {
+    const std::string node = Destination::findDeviceNode(target.device, disk_by_root);
     if (node.empty()) {
         return {};
     }
 
     std::string mount_point = Destination::findMountPoint(node);
-    if (mount_point.empty() && config.mount_device) {
+    if (mount_point.empty() && target.mount_device) {
         mountDeviceNode(node, mount_point);
     }
 
@@ -178,7 +178,7 @@ std::string resolveDevice(const Config& config, const std::string& disk_by_root)
 
     // Everything below here sits on the device itself, so creating the whole
     // path is safe.
-    const std::string destination = joinPath(mount_point, config.device_path);
+    const std::string destination = joinPath(mount_point, target.device_path);
 
     std::error_code ec;
     fs::create_directories(destination, ec);
@@ -393,24 +393,40 @@ bool onRootFilesystem(const std::string& path) {
     return path_stat.st_dev == root_stat.st_dev;
 }
 
-std::string describe(const Config& config) {
-    if (config.usesDevice()) {
-        if (config.device_path.empty()) {
-            return config.device.describe();
+std::string describe(const Target& target) {
+    if (target.usesDevice()) {
+        if (target.device_path.empty()) {
+            return target.device.describe();
         }
 
-        return config.device.describe() + ", path " + config.device_path;
+        return target.device.describe() + ", path " + target.device_path;
     }
 
-    return config.destination;
+    if (target.usesWebDav()) {
+        if (target.webdav_path.empty()) {
+            return target.webdav.describe();
+        }
+
+        return target.webdav.describe() + ", path " + target.webdav_path;
+    }
+
+    if (target.usesSftp()) {
+        if (target.sftp_path.empty()) {
+            return target.sftp.describe();
+        }
+
+        return target.sftp.describe() + ", path " + target.sftp_path;
+    }
+
+    return target.destination;
 }
 
-std::string resolve(const Config& config, const std::string& disk_by_root) {
-    if (config.usesDevice()) {
-        return resolveDevice(config, disk_by_root);
+std::string resolve(const Target& target, const std::string& disk_by_root) {
+    if (target.usesDevice()) {
+        return resolveDevice(target, disk_by_root);
     }
 
-    return resolvePath(config.destination);
+    return resolvePath(target.destination);
 }
 
 }  // namespace Destination

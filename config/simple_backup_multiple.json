@@ -1,0 +1,24 @@
+{
+    "sources": [
+        "/home/user/Documents"
+    ],
+    "destination": [
+        {
+            "device": {
+                "uuid": "34C0-66F7",
+                "name": "Samsung USB"
+            },
+            "path": ""
+        },
+        {
+            "webdav": {
+                "url": "https://localhost:493",
+                "username": "alice",
+                "password_file": "/etc/simple_backup/webdav.password",
+                "ca_file": "/srv/webdav-chroot/etc/webdav/tls/cert.pem",
+                "name": "Local WebDAV"
+            },
+            "path": ""
+        }
+    ]
+}

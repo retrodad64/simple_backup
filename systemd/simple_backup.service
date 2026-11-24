@@ -1,7 +1,9 @@
 [Unit]
 Description=Simple Backup Service
 Documentation=man:simple_backup(1)
-After=local-fs.target
+# network-online.target matters for a WebDAV or SFTP destination only.
+After=local-fs.target network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
